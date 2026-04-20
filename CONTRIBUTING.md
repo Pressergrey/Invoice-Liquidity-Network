@@ -29,7 +29,7 @@ To contribute. We welcome:
 
 ## Applying to work on an issue
 
-We use an application process to avoid duplicate work and ensure bounties go to contributors who are set up to deliver.
+We use an application process to avoid duplicate work.
 
 ### Step 1 — Find an issue
 
@@ -51,7 +51,6 @@ Leave a comment on the issue with the following:
 - **What I plan to build:** [brief description of your approach]
 - **Relevant experience:** [links to past work, GitHub repos, or context]
 - **Estimated timeline:** [how many days you need]
-- **Ethereum wallet address:** [for Drips bounty payment]
 - **Questions / blockers:** [anything you need clarified before starting]
 ```
 
