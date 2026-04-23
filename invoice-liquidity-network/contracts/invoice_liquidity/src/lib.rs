@@ -331,3 +331,4 @@ fn discount_rate_as_i128(rate: u32) -> i128 {
 }
 
 mod test;
+mod tests_security;
