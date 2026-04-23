@@ -229,7 +229,7 @@ fn test_fund_invoice_transfers_correct_amounts() {
     let funder_balance_before     = t.token.balance(&t.funder);
     let freelancer_balance_before = t.token.balance(&t.freelancer);
 
-    t.contract.fund_invoice(&t.funder, &id);
+    t.contract.fund_invoice(&t.funder, &id, &INVOICE_AMOUNT);
 
     let funder_balance_after     = t.token.balance(&t.funder);
     let freelancer_balance_after = t.token.balance(&t.freelancer);
@@ -258,7 +258,7 @@ fn test_fund_invoice_updates_status_to_funded() {
     let t = setup();
     let id = submit_standard_invoice(&t);
 
-    t.contract.fund_invoice(&t.funder, &id);
+    t.contract.fund_invoice(&t.funder, &id, &INVOICE_AMOUNT);
 
     let invoice = t.contract.get_invoice(&id);
 
@@ -273,7 +273,7 @@ fn test_fund_invoice_sets_funded_at_timestamp() {
     let id  = submit_standard_invoice(&t);
     let now = t.env.ledger().timestamp();
 
-    t.contract.fund_invoice(&t.funder, &id);
+    t.contract.fund_invoice(&t.funder, &id, &INVOICE_AMOUNT);
 
     let invoice = t.contract.get_invoice(&id);
     assert_eq!(invoice.funded_at, Some(now));
@@ -296,11 +296,11 @@ fn test_fund_already_funded_invoice_fails() {
     let t = setup();
     let id = submit_standard_invoice(&t);
 
-    t.contract.fund_invoice(&t.funder, &id);
+    t.contract.fund_invoice(&t.funder, &id, &INVOICE_AMOUNT);
 
     // Second funder tries to fund the same invoice
     let second_funder = Address::generate(&t.env);
-    let result = t.contract.try_fund_invoice(&second_funder, &id);
+    let result = t.contract.try_fund_invoice(&second_funder, &id, &INVOICE_AMOUNT);
 
     assert_eq!(result, Err(Ok(ContractError::AlreadyFunded)));
 }
@@ -314,7 +314,7 @@ fn test_mark_paid_releases_full_amount_to_lp() {
     let t = setup();
     let id = submit_standard_invoice(&t);
 
-    t.contract.fund_invoice(&t.funder, &id);
+    t.contract.fund_invoice(&t.funder, &id, &INVOICE_AMOUNT);
 
     let funder_balance_before = t.token.balance(&t.funder);
 
@@ -336,7 +336,7 @@ fn test_mark_paid_updates_status() {
     let t = setup();
     let id = submit_standard_invoice(&t);
 
-    t.contract.fund_invoice(&t.funder, &id);
+    t.contract.fund_invoice(&t.funder, &id, &INVOICE_AMOUNT);
     t.contract.mark_paid(&id);
 
     let invoice = t.contract.get_invoice(&id);
@@ -352,7 +352,7 @@ fn test_full_lifecycle_lp_earns_correct_yield() {
     let lp_start = t.token.balance(&t.funder);
 
     // LP funds the invoice
-    t.contract.fund_invoice(&t.funder, &id);
+    t.contract.fund_invoice(&t.funder, &id, &INVOICE_AMOUNT);
 
     // Payer settles
     t.contract.mark_paid(&id);
@@ -376,7 +376,7 @@ fn test_full_lifecycle_payer_balance_reduces_correctly() {
 
     let payer_start = t.token.balance(&t.payer);
 
-    t.contract.fund_invoice(&t.funder, &id);
+    t.contract.fund_invoice(&t.funder, &id, &INVOICE_AMOUNT);
     t.contract.mark_paid(&id);
 
     let payer_end = t.token.balance(&t.payer);
@@ -422,4 +422,91 @@ fn test_mark_paid_nonexistent_invoice_fails() {
 
     let result = t.contract.try_mark_paid(&999);
     assert_eq!(result, Err(Ok(ContractError::InvoiceNotFound)));
+}
+// ----------------------------------------------------------------
+// claim_default — happy path
+// ----------------------------------------------------------------
+
+#[test]
+fn test_claim_default_reclaims_discount_to_lp() {
+    let t = setup();
+    let id = submit_standard_invoice(&t);
+
+    t.contract.fund_invoice(&t.funder, &id, &INVOICE_AMOUNT);
+
+    // Fast forward ledger time to after due_date
+    let mut ledger_info = t.env.ledger().get();
+    ledger_info.timestamp += DUE_DATE_OFFSET + 1;
+    t.env.ledger().set(ledger_info);
+
+    let funder_balance_before = t.token.balance(&t.funder);
+
+    t.contract.claim_default(&t.funder, &id);
+
+    let funder_balance_after = t.token.balance(&t.funder);
+
+    // LP should receive the escrowed discount amount
+    let discount_amount = INVOICE_AMOUNT * DISCOUNT_RATE as i128 / 10_000;
+    assert_eq!(
+        funder_balance_after - funder_balance_before,
+        discount_amount,
+        "LP should receive the escrowed discount on default"
+    );
+
+    let invoice = t.contract.get_invoice(&id);
+    assert_eq!(invoice.status, InvoiceStatus::Defaulted);
+
+    // Reputation score should decrease
+    assert_eq!(t.contract.payer_score(&t.payer), 45); // 50 - 5
+}
+
+// ----------------------------------------------------------------
+// partial funding
+// ----------------------------------------------------------------
+
+#[test]
+fn test_partial_funding_works() {
+    let t = setup();
+    let id = submit_standard_invoice(&t);
+
+    let funder1 = Address::generate(&t.env);
+    let funder2 = Address::generate(&t.env);
+    t.token.mint(&funder1, &INVOICE_AMOUNT);
+    t.token.mint(&funder2, &INVOICE_AMOUNT);
+
+    // Fund 40%
+    t.contract.fund_invoice(&funder1, &id, &(INVOICE_AMOUNT * 4000 / 10000));
+    assert_eq!(t.contract.get_invoice(&id).status, InvoiceStatus::PartiallyFunded);
+
+    // Fund remaining 60%
+    t.contract.fund_invoice(&funder2, &id, &(INVOICE_AMOUNT * 6000 / 10000));
+    assert_eq!(t.contract.get_invoice(&id).status, InvoiceStatus::Funded);
+}
+
+#[test]
+fn test_mark_paid_distributes_proportionally() {
+    let t = setup();
+    let id = submit_standard_invoice(&t);
+
+    let funder1 = Address::generate(&t.env);
+    let funder2 = Address::generate(&t.env);
+    t.token.mint(&funder1, &INVOICE_AMOUNT);
+    t.token.mint(&funder2, &INVOICE_AMOUNT);
+
+    t.contract.fund_invoice(&funder1, &id, &(INVOICE_AMOUNT * 3 / 10)); // 30%
+    t.contract.fund_invoice(&funder2, &id, &(INVOICE_AMOUNT * 7 / 10)); // 70%
+
+    let bal1_before = t.token.balance(&funder1);
+    let bal2_before = t.token.balance(&funder2);
+
+    t.contract.mark_paid(&id);
+
+    let bal1_after = t.token.balance(&funder1);
+    let bal2_after = t.token.balance(&funder2);
+
+    let discount_amount = INVOICE_AMOUNT * DISCOUNT_RATE as i128 / 10_000;
+    let total_payout = INVOICE_AMOUNT + discount_amount;
+
+    assert_eq!(bal1_after - bal1_before, total_payout * 3 / 10);
+    assert_eq!(bal2_after - bal2_before, total_payout * 7 / 10);
 }
