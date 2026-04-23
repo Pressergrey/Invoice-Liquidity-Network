@@ -7,10 +7,11 @@ use soroban_sdk::{contracttype, Address, Env, Vec};
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum InvoiceStatus {
-    Pending,
-    Funded,
-    Paid,
-    Defaulted,
+    Pending,   // submitted, waiting for a liquidity provider to fund it
+    Funded,    // LP has funded it, freelancer has been paid out
+    PartiallyFunded, // partially funded by one or more LPs
+    Paid,      // payer has settled in full, LP has been released
+    Defaulted, // past due_date and still unpaid
 }
 
 // ----------------------------------------------------------------
@@ -20,13 +21,16 @@ pub enum InvoiceStatus {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Invoice {
-    pub id: u64,
-    pub freelancer: Address,
-    pub lp: Address,
-    pub amount: i128,
-    pub discount_rate: i128,
-    pub status: InvoiceStatus,
-    pub token: Address, // invoice-specific token
+    pub id:            u64,
+    pub freelancer:    Address,  // who submitted the invoice (receives liquidity)
+    pub payer:         Address,  // the client who owes the money
+    pub amount:        i128,     // full invoice value in stroops (1 USDC = 10_000_000)
+    pub due_date:      u64,      // Unix timestamp — when the payer must settle by
+    pub discount_rate: u32,      // basis points, e.g. 300 = 3.00%
+    pub status:        InvoiceStatus,
+    pub funder:        Option<Address>, // set when an LP funds the invoice (legacy for full funding)
+    pub funded_at:     Option<u64>,     // ledger timestamp when funding occurred
+    pub amount_funded: i128,            // cumulative amount funded so far
 }
 
 // ----------------------------------------------------------------
@@ -35,12 +39,11 @@ pub struct Invoice {
 
 #[contracttype]
 pub enum StorageKey {
-    Invoice(u64),
-    InvoiceCount,
-
-    // Multi-token registry
-    ApprovedToken(Address), // maps token → bool
-    TokenList,              // Vec<Address>
+    Invoice(u64),   // Invoice by ID
+    InvoiceCount,   // auto-increment counter for IDs
+    Token,          // USDC token address
+    PayerScore(Address), // Reputation score for a payer
+    InvoiceFunders(u64), // List of funders for a partially funded invoice
 }
 
 // ----------------------------------------------------------------
@@ -81,44 +84,47 @@ pub fn next_invoice_id(env: &Env) -> u64 {
 
     next
 }
++
++/// Get a payer's reputation score (0-100, default 50)
++pub fn get_payer_score(env: &Env, payer: &Address) -> u32 {
++    env.storage()
++        .persistent()
++        .get(&StorageKey::PayerScore(payer.clone()))
++        .unwrap_or(50)
++}
++
++/// Update a payer's reputation score
 
-// ----------------------------------------------------------------
-// TOKEN REGISTRY HELPERS (NEW LOGIC)
-// ----------------------------------------------------------------
-
-/// Check if token is approved
-pub fn is_approved_token(env: &Env, token: &Address) -> bool {
+/// Get a payer's reputation score (0-100, default 50)
+pub fn get_payer_score(env: &Env, payer: &Address) -> u32 {
     env.storage()
         .persistent()
-        .get(&StorageKey::ApprovedToken(token.clone()))
-        .unwrap_or(false)
+        .get(&StorageKey::PayerScore(payer.clone()))
+        .unwrap_or(50)
 }
 
-/// Add token to registry (admin-only logic handled in contract)
-pub fn set_token_approved(env: &Env, token: &Address, approved: bool) {
+/// Update a payer's reputation score
+pub fn set_payer_score(env: &Env, payer: &Address, score: u32) {
+    let mut score = score;
+    if score > 100 {
+        score = 100;
+    }
     env.storage()
         .persistent()
-        .set(&StorageKey::ApprovedToken(token.clone()), &approved);
+        .set(&StorageKey::PayerScore(payer.clone()), &score);
 }
 
-/// Get all approved tokens
-pub fn get_token_list(env: &Env) -> Vec<Address> {
+/// Get the list of funders and their contributions for an invoice
+pub fn get_invoice_funders(env: &Env, id: u64) -> soroban_sdk::Vec<(Address, i128)> {
     env.storage()
         .persistent()
-        .get(&StorageKey::TokenList)
-        .unwrap_or(Vec::new(env))
+        .get(&StorageKey::InvoiceFunders(id))
+        .unwrap_or(soroban_sdk::Vec::new(env))
 }
 
-/// Add token to list
-pub fn add_to_token_list(env: &Env, token: Address) {
-    let mut list: Vec<Address> = get_token_list(env);
-    list.push_back(token);
-    env.storage().persistent().set(&StorageKey::TokenList, &list);
-}
-
-/// Remove token from list
-pub fn remove_from_token_list(env: &Env, token: Address) {
-    let mut list: Vec<Address> = get_token_list(env);
-    list.retain(|t| t != &token);
-    env.storage().persistent().set(&StorageKey::TokenList, &list);
+/// Save the list of funders for an invoice
+pub fn save_invoice_funders(env: &Env, id: u64, funders: &soroban_sdk::Vec<(Address, i128)>) {
+    env.storage()
+        .persistent()
+        .set(&StorageKey::InvoiceFunders(id), funders);
 }
