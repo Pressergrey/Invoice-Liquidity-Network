@@ -31,6 +31,16 @@ pub struct Invoice {
     pub funded_at:     Option<u64>,     // ledger timestamp when funding occurred
 }
 
+
+#[contracttype]
+#[derive(Clone, Debug, Default)]
+pub struct PayerStats {
+    pub total_invoices: u64,
+    pub paid_on_time: u64,
+    pub defaults: u64,
+    pub total_volume: i128,
+}
+
 // ----------------------------------------------------------------
 // Storage key — one key type per stored entity keeps storage clean
 // ----------------------------------------------------------------
@@ -40,6 +50,7 @@ pub enum StorageKey {
     Invoice(u64),   // Invoice by ID
     InvoiceCount,   // auto-increment counter for IDs
     Token,          // USDC token address
+    PayerStats(Address), // aggregate stats for each payer (total invoiced, paid, defaulted)
 }
 
 // ----------------------------------------------------------------
@@ -80,4 +91,21 @@ pub fn next_invoice_id(env: &Env) -> u64 {
         .persistent()
         .set(&StorageKey::InvoiceCount, &next);
     next
+}
+
+pub fn load_payer_stats(env: &Env, payer: &Address) -> PayerStats {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::PayerStats(payer.clone()))
+        .unwrap_or(PayerStats {
+            total_paid: 0,
+            total_defaulted: 0,
+            total_volume: 0,
+        })
+}
+
+pub fn save_payer_stats(env: &Env, payer: &Address, stats: &PayerStats) {
+    env.storage()
+        .persistent()
+        .set(&StorageKey::PayerStats(payer.clone()), stats);
 }

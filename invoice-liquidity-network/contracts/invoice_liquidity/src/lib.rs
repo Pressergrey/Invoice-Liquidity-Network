@@ -12,6 +12,7 @@ use soroban_sdk::{
 use errors::ContractError;
 use invoice::{
     invoice_exists, load_invoice, next_invoice_id, save_invoice,
+    load_payer_stats, save_payer_stats,
     Invoice, InvoiceStatus, StorageKey,
 };
 
@@ -229,8 +230,15 @@ impl InvoiceLiquidityContract {
         // Total = invoice.amount + discount_amount
         token.transfer(&contract_address, &funder, &(invoice.amount + discount_amount));
 
-        // --- Update invoice state ---
+        // ---- Update payer stats ----
+        let mut stats = load_payer_stats(&env, &invoice.payer);
 
+        stats.total_paid += 1;
+        stats.total_volume += invoice.amount;
+
+        save_payer_stats(&env, &invoice.payer, &stats);
+
+        // ---- Update invoice ----
         invoice.status = InvoiceStatus::Paid;
         save_invoice(&env, &invoice);
 
@@ -302,6 +310,124 @@ impl InvoiceLiquidityContract {
         }
         Ok(load_invoice(&env, invoice_id))
     }
+
+    // ----------------------------------------------------------------
+    // claim_default
+    //
+    // Called by the LP (funder) if the payer fails to pay before due_date.
+    //
+    // Allows the LP to recover their escrowed discount.
+    //
+    // Conditions:
+    // - Only funder can call
+    // - Must be after due_date
+    // - Invoice must be Funded
+    //
+    // Effects:
+    // - Transfers escrowed discount back to funder
+    // - Marks invoice as Defaulted
+    // - Emits "defaulted" event
+    // ----------------------------------------------------------------
+    pub fn claim_default(
+        env:        Env,
+        invoice_id: u64,
+    ) -> Result<(), ContractError> {
+
+        if !invoice_exists(&env, invoice_id) {
+            return Err(ContractError::InvoiceNotFound);
+        }
+
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        // Must have a funder
+        let funder = invoice
+            .funder
+            .clone()
+            .ok_or(ContractError::NotFunded)?;
+
+        // Only funder can call
+        funder.require_auth();
+
+        // Must be after due_date
+        let now = env.ledger().timestamp();
+        if now <= invoice.due_date {
+            return Err(ContractError::NotYetDefaulted);
+        }
+
+        // Validate status
+        match invoice.status {
+            InvoiceStatus::Pending   => return Err(ContractError::NotFunded),
+            InvoiceStatus::Paid      => return Err(ContractError::AlreadyPaid),
+            InvoiceStatus::Defaulted => return Err(ContractError::InvoiceDefaulted),
+            InvoiceStatus::Funded    => {} // ✅ correct state
+        }
+
+        let token = usdc_client(&env);
+        let contract_address = env.current_contract_address();
+
+        // Calculate escrowed discount
+        let discount_amount = invoice.amount
+            .checked_mul(discount_rate_as_i128(invoice.discount_rate))
+            .unwrap_or(0)
+            / 10_000;
+
+        // Transfer escrowed discount back to funder
+        token.transfer(&contract_address, &funder, &discount_amount);
+
+        // ---- Update payer stats ----
+        let mut stats = load_payer_stats(&env, &invoice.payer);
+
+        stats.total_paid += 1;
+        stats.total_volume += invoice.amount;
+
+        save_payer_stats(&env, &invoice.payer, &stats);
+
+        // ---- Update invoice ----
+        invoice.status = InvoiceStatus::Paid;
+        save_invoice(&env, &invoice);
+
+        // Emit event
+        env.events().publish(
+            (soroban_sdk::symbol_short!("defaulted"),),
+            invoice_id,
+        );
+
+        Ok(())
+    }
+
+    pub fn payer_score(env: Env, payer: Address) -> u32 {
+        let stats = load_payer_stats(&env, &payer);
+
+        let total = stats.total_paid + stats.total_defaulted;
+
+        if total == 0 {
+            return 50; // neutral
+        }
+
+        let payment_ratio = stats.total_paid * 100 / total;
+
+        let volume_bonus = if stats.total_volume > 10_000_000_000 {
+            10
+        } else {
+            0
+        };
+
+        let score = payment_ratio + volume_bonus;
+
+        if score > 100 { 100 } else { score }
+    }
+
+    pub fn suggested_discount_rate(env: Env, payer: Address) -> u32 {
+        let score = Self::payer_score(env, payer);
+
+        match score {
+            90..=100 => 100,   // 1%
+            75..=89  => 200,   // 2%
+            60..=74  => 300,   // 3%
+            40..=59  => 500,   // 5%
+            _        => 800,   // 8%
+        }
+    }
 }
 
 // ----------------------------------------------------------------
@@ -319,5 +445,6 @@ fn usdc_client(env: &Env) -> TokenClient<'_> {
 fn discount_rate_as_i128(rate: u32) -> i128 {
     rate as i128
 }
+
 
 mod test;
