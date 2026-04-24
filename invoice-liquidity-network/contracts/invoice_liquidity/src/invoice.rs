@@ -45,6 +45,16 @@ pub struct InvoiceParams {
     pub token: Address,
 }
 
+
+#[contracttype]
+#[derive(Clone, Debug, Default)]
+pub struct PayerStats {
+    pub total_invoices: u64,
+    pub paid_on_time: u64,
+    pub defaults: u64,
+    pub total_volume: i128,
+}
+
 // ----------------------------------------------------------------
 // Storage key (UPDATED for multi-token registry)
 // ----------------------------------------------------------------
