@@ -86,6 +86,20 @@ The repository now includes a typed SDK package at [sdk/README.md](/Users/mac/De
 npm install @invoice-liquidity/sdk
 ```
 
+## Frontend Snapshot Tests
+
+The frontend uses Vitest snapshots for key UI states so unintentional visual changes are caught during review.
+
+```bash
+cd frontend && npm test
+```
+
+To intentionally refresh committed snapshots after a UI change:
+
+```bash
+cd frontend && npm test -- --update-snapshots
+```
+
 ---
 
 ## Repository Structure
